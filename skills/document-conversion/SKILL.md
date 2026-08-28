@@ -42,4 +42,4 @@ Return route and reason, source identifier, canonical output path, provenance/ve
 
 ## References
 
-- `../../docs/skill-style-guide.md` — project skill contract.
+- No supporting files; this skill is self-contained.
