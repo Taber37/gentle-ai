@@ -28,6 +28,7 @@ var releasedPluginDigests = map[string][]string{
 		"886f5c89a6da4ae1b378aed39cbc7f90b0e4dc5c92350660db015287fb3c2445", // plugins-v2/ v3.3.0 to v3.7.0
 		"e52edacb8868d227cb5ec74505fa60dc555d120ec7b5c64ceaf0291176856e94", // plugins-v2/ v4.0.0
 		"3e58dde99d5a8ecf4d1a8377a24c86cb90ef99015815ab93f1775bdbc5766268", // plugins/ v4.0.0
+		"0f2a91a3579f65d5b04a94c0833103d2b9c37a7869c3880eed34d8bbbdc0e3c5", // plugins-v2/ unreleased
 	},
 	"review-result-artifacts.ts": {
 		"5f22438ddf29e1c0f0aad68a48f8feb4c188a01e8d6853d062a09c60a7e39936", // plugins/ v2.1.7
@@ -40,6 +41,15 @@ var releasedPluginDigests = map[string][]string{
 		"8f3142439b2dd39ec9615f5d8f99d984b57453c596621f1ccc5afdddcbebd60e", // plugins/ v2.3.0-rc.2 to v2.3.0
 		"06969058586a3ac26f59ccc8be8dc236db3815ec4b6b4ca62f7ca1e0b9270c87", // plugins/ v2.4.0-rc.1 to v2.4.0-rc.6
 		"5ab48f728e7a8d1799dff1624e5842ab76077ca0aa346b04a7f7ac1fcee0f27f", // plugins/ v2.4.0-rc.7
+	},
+	"sdd-task-result-artifacts.ts": {
+		"bfd291ff60c7d186d3e727327a9cc038a8ac4275128bcb8b406cb322858eb6f6", // plugins/ v2.4.0-rc.8 to v2.4.0
+		"a571b08f05c6f0d3726fbbd0144b387d2b139c4a701f398d7c7d2044878dd3d5", // plugins/ v2.5.0-rc.1 to v2.5.0-rc.3
+		"0c514e085be33de5871da15bd2b021aea286676c2a4b723c31ba02b8acd8833d", // plugins/ v2.5.0 to v2.6.0
+		"b8f1cdcfe38df960d37d8700eb6a9875335302761bfca1d0d10df02b4c18b7d4", // plugins/ v2.7.0-rc.1 to v2.7.0
+		"9440325b6ea325804f4972a993cbb457b7babe0085010a47e16c00763afb9c5f", // plugins/ v2.8.0 to v2.8.1
+		"e497b37070f5178fcab110bd964b7fd0af6e299c467eb630093f9c4d9ca7e404", // plugins/ v2.8.2 to v3.7.0
+		"2c49d774b21edaf7bd6ffb9d3447d9dd54828dce6dd846fcc49274173bebd3ca", // plugins-v2/ v3.3.0 to v3.7.0
 	},
 	"skill-registry.ts": {
 		"b24f83e90d455807dbd122f12a953952e7ff6550e3a0d733030c22843f0ce148", // plugins/ v1.39.1 to v2.4.0-rc.7

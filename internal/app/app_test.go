@@ -28,6 +28,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/v4/internal/state"
 	"github.com/gentleman-programming/gentle-ai/v4/internal/system"
 	"github.com/gentleman-programming/gentle-ai/v4/internal/tui"
+	"github.com/gentleman-programming/gentle-ai/v4/internal/tui/screens"
 	"github.com/gentleman-programming/gentle-ai/v4/internal/update"
 	"github.com/gentleman-programming/gentle-ai/v4/internal/update/upgrade"
 )
@@ -733,7 +734,9 @@ func buildAppCandidateBinary(t *testing.T) string {
 	// 30s; the cap only guards against a hung toolchain, not build speed.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, "go", "build", "-o", binary, "../../cmd/gentle-ai")
+	// This fixture tests runtime state, not VCS metadata. Avoid consulting
+	// ambient repository ancestry when building from a linked worktree.
+	command := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", binary, "../../cmd/gentle-ai")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build candidate binary: %v\n%s", err, output)
 	}
@@ -838,6 +841,60 @@ func TestDeferredSyncIncludesCodexPermissionsArgs(t *testing.T) {
 	}
 	if args := syncArgsForDiscoveredAgents(configured); len(args) != 0 {
 		t.Fatalf("configured Custom sync args = %v, want none", args)
+	}
+}
+
+func TestTuiSyncPreservesClaudeBalancedPreset(t *testing.T) {
+	for _, phase := range []bool{false, true} {
+		t.Run(fmt.Sprintf("phase=%t", phase), func(t *testing.T) {
+			home := t.TempDir()
+			balanced := model.ClaudeModelPresetBalanced()
+			initial := state.InstallState{InstalledAgents: []string{string(model.AgentClaudeCode)}}
+			if phase {
+				initial.ClaudePhaseAssignments = make(map[string]state.ClaudePhaseAssignmentState)
+				for role, alias := range balanced {
+					initial.ClaudePhaseAssignments[role] = state.ClaudePhaseAssignmentState{Model: string(alias)}
+				}
+			} else {
+				initial.ClaudeModelAssignments = make(map[string]string)
+				for role, alias := range balanced {
+					initial.ClaudeModelAssignments[role] = string(alias)
+				}
+			}
+			if err := state.Write(home, initial); err != nil {
+				t.Fatal(err)
+			}
+			for syncRun := 0; syncRun < 2; syncRun++ {
+				if _, err := tuiSync(home)(nil); err != nil {
+					t.Fatalf("sync %d: %v", syncRun, err)
+				}
+				persisted, err := state.Read(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(persisted.ClaudePhaseAssignments, initial.ClaudePhaseAssignments) ||
+					!reflect.DeepEqual(persisted.ClaudeModelAssignments, initial.ClaudeModelAssignments) {
+					t.Fatalf("sync %d changed Claude preset assignments: phase=%v legacy=%v", syncRun, persisted.ClaudePhaseAssignments, persisted.ClaudeModelAssignments)
+				}
+				reopened := model.Selection{}
+				loadPersistedAssignments(home, &reopened)
+				assignments := reopened.ClaudePhaseAssignments
+				if !phase {
+					assignments = model.ClaudePhaseAssignmentsFromLegacy(reopened.ClaudeModelAssignments)
+				}
+				picker := screens.NewClaudeModelPickerStateFromPhaseAssignments(assignments)
+				if picker.Preset != screens.ClaudePresetBalanced {
+					t.Fatalf("sync %d reopened preset = %v, want Balanced", syncRun, picker.Preset)
+				}
+				body, err := os.ReadFile(filepath.Join(home, ".claude", "CLAUDE.md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(body), "| orchestrator |") {
+					t.Fatal("persisted metadata must not expose an orchestrator model row in the parent prompt")
+				}
+			}
+		})
 	}
 }
 
@@ -1120,8 +1177,8 @@ func TestLoadPersistedAssignmentsPopulatesEmptySelection(t *testing.T) {
 	selection := model.Selection{}
 	loadPersistedAssignments(home, &selection)
 
-	if _, exists := selection.ClaudeModelAssignments["orchestrator"]; exists {
-		t.Errorf("ClaudeModelAssignments should not load persisted orchestrator model: %v", selection.ClaudeModelAssignments)
+	if got := selection.ClaudeModelAssignments["orchestrator"]; got != model.ClaudeModelOpus {
+		t.Errorf("persisted orchestrator metadata = %q, want opus", got)
 	}
 	if got := selection.ClaudeModelAssignments["sdd-apply"]; got != "sonnet" {
 		t.Errorf("ClaudeModelAssignments[sdd-apply] = %q, want %q", got, "sonnet")
@@ -1205,8 +1262,8 @@ func TestPersistAssignmentsPreservesInstalledAgents(t *testing.T) {
 	if len(got.InstalledAgents) != 2 {
 		t.Fatalf("InstalledAgents = %v, want [claude-code opencode]", got.InstalledAgents)
 	}
-	if _, exists := got.ClaudeModelAssignments["orchestrator"]; exists {
-		t.Errorf("ClaudeModelAssignments should not persist orchestrator model: %v", got.ClaudeModelAssignments)
+	if alias := got.ClaudeModelAssignments["orchestrator"]; alias != "opus" {
+		t.Errorf("persisted orchestrator metadata = %q, want opus", alias)
 	}
 	if got.ClaudeModelAssignments["sdd-apply"] != "sonnet" {
 		t.Errorf("ClaudeModelAssignments[sdd-apply] = %q, want %q", got.ClaudeModelAssignments["sdd-apply"], "sonnet")
@@ -2632,6 +2689,91 @@ func TestCustomClearRoundTripLeavesFutureSyncInPreserveMode(t *testing.T) {
 	loadPersistedAssignments(home, &future)
 	if future.CodexOrchestratorAssignment != nil || future.ClearCodexOrchestratorAssignment {
 		t.Fatalf("future sync did not return to preserve mode: assignment=%#v clear=%v", future.CodexOrchestratorAssignment, future.ClearCodexOrchestratorAssignment)
+	}
+}
+
+func TestLoadPersistedCodexServiceTierRestoresOnlyValidValues(t *testing.T) {
+	for _, tt := range []struct{ persisted, want string }{
+		{"priority", "priority"},
+		{"priority\nmodel = \"x\"", ""},
+	} {
+		home := t.TempDir()
+		if err := state.Write(home, state.InstallState{InstalledAgents: []string{"codex"}, CodexServiceTier: tt.persisted}); err != nil {
+			t.Fatalf("state.Write (seed): %v", err)
+		}
+		selection := model.Selection{}
+		loadPersistedAssignments(home, &selection)
+		if selection.CodexServiceTier != tt.want || selection.CodexManagedServiceTier != tt.want {
+			t.Fatalf("restored %q: tier = %q managed = %q, want %q", tt.persisted, selection.CodexServiceTier, selection.CodexManagedServiceTier, tt.want)
+		}
+	}
+}
+
+func TestPersistAssignmentsNeverRecordsTheSelectedCodexServiceTier(t *testing.T) {
+	home := t.TempDir()
+	if err := state.Write(home, state.InstallState{InstalledAgents: []string{"codex"}, CodexServiceTier: "flex"}); err != nil {
+		t.Fatalf("state.Write (seed): %v", err)
+	}
+	if err := persistAssignments(home, model.Selection{CodexServiceTier: "priority", CodexManagedServiceTier: "flex"}); err != nil {
+		t.Fatal(err)
+	}
+	if persisted, err := state.Read(home); err != nil || persisted.CodexServiceTier != "flex" {
+		t.Fatalf("persisted tier = %q, err = %v; want flex (only engram's write result is recorded)", persisted.CodexServiceTier, err)
+	}
+}
+
+func codexServiceTierInstall(t *testing.T, home string, components []model.ComponentID, desired, managed string) {
+	t.Helper()
+	selection := model.Selection{Agents: []model.AgentID{model.AgentCodex}, Components: components, CodexServiceTier: desired, CodexManagedServiceTier: managed}
+	resolved := planner.ResolvedPlan{Agents: selection.Agents, OrderedComponents: components}
+	if result := tuiExecuteWithBackground(selection, resolved, system.DetectionResult{}, "", "", "", "", nil); result.Err != nil {
+		t.Fatalf("TUI install error = %v", result.Err)
+	}
+}
+
+func codexConfigAndStateTier(t *testing.T, home string) (string, string) {
+	t.Helper()
+	config, _ := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	persisted, err := state.Read(home)
+	if err != nil {
+		t.Fatalf("state.Read: %v", err)
+	}
+	return string(config), persisted.CodexServiceTier
+}
+
+// TestTUIInstallRecordsOnlyTheCodexServiceTierEngramWrote covers both halves
+// of the managed-tier contract: a tier no engram run wrote is never recorded,
+// and a Standard install in the session that wrote Fast retires exactly it.
+func TestTUIInstallRecordsOnlyTheCodexServiceTierEngramWrote(t *testing.T) {
+	t.Cleanup(codex.SetRuntimeVersionCommandForTest("codex-cli 0.144.0", nil))
+	if runtime.GOOS == "windows" {
+		t.Skip("fake engram runtime is a POSIX shell script")
+	}
+	home := t.TempDir()
+	previousUserHomeDir := appUserHomeDir
+	appUserHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { appUserHomeDir = previousUserHomeDir })
+	// A fake engram on PATH keeps the engram component from installing anything.
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "engram"), []byte("#!/bin/sh\nprintf 'engram 1.18.0\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	codexServiceTierInstall(t, home, []model.ComponentID{model.ComponentPersona}, "priority", "")
+	if config, recorded := codexConfigAndStateTier(t, home); recorded != "" || strings.Contains(config, "service_tier") {
+		t.Fatalf("unwritten tier recorded: state = %q config:\n%s", recorded, config)
+	}
+
+	codexServiceTierInstall(t, home, []model.ComponentID{model.ComponentEngram}, "priority", "")
+	if config, recorded := codexConfigAndStateTier(t, home); recorded != "priority" || !strings.Contains(config, `service_tier = "priority"`) {
+		t.Fatalf("written tier not recorded: state = %q config:\n%s", recorded, config)
+	}
+
+	// Same session, now Standard: the managed value is what state recorded.
+	codexServiceTierInstall(t, home, []model.ComponentID{model.ComponentEngram}, "", "priority")
+	if config, recorded := codexConfigAndStateTier(t, home); recorded != "" || strings.Contains(config, "service_tier") {
+		t.Fatalf("Standard left an orphan: state = %q config:\n%s", recorded, config)
 	}
 }
 

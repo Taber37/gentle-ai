@@ -230,7 +230,7 @@ func TestRetiredSDDExplicitUninstallFailsWithoutWrites(t *testing.T) {
 			if kind == "partial" {
 				_, err = svc.PartialUninstall([]model.AgentID{model.AgentClaudeCode}, []model.ComponentID{model.ComponentSDD})
 			} else {
-				_, err = svc.PartialUninstallWithProfiles([]model.AgentID{model.AgentClaudeCode}, []model.ComponentID{model.ComponentSDD}, []string{"custom"}, model.EngramUninstallScopeGlobal)
+				_, err = svc.PartialUninstallWithEngramScope([]model.AgentID{model.AgentClaudeCode}, []model.ComponentID{model.ComponentSDD}, model.EngramUninstallScopeGlobal)
 			}
 			if err == nil || !strings.Contains(err.Error(), "retired") {
 				t.Fatalf("expected retired component rejection, got %v", err)
@@ -261,9 +261,9 @@ func TestRetiredSDDExplicitUninstallFailsWithoutWrites(t *testing.T) {
 
 // TestCompleteUninstallPreservesNativeReviewAndJudgmentDayAgents proves native
 // review and Judgment Day agent files survive uninstall without a dedicated
-// retention allowlist: nothing in the uninstall plan enumerates or removes
-// the sub-agents directory at all, so these permanently-installed native
-// agents (installed unconditionally by reviewassets.InstallNativeAgents,
+// retention allowlist: uninstall only inspects the retired SDD agent files
+// of the sub-agents directory, so these permanently-installed native agents
+// (installed unconditionally by reviewassets.InstallNativeAgents,
 // independent of any removable component) are never touched.
 func TestCompleteUninstallPreservesNativeReviewAndJudgmentDayAgents(t *testing.T) {
 	home := t.TempDir()
@@ -2189,6 +2189,124 @@ func TestRetainedHooksOutsideFullAgentRemoval(t *testing.T) {
 	}
 }
 
+// Uninstall owns every plugin byte sequence a Gentle AI release shipped under
+// that name, including retired plugins, and preserves all other bytes.
+func TestFullAgentOpenCodeUninstallRemovesReleasedPluginBytes(t *testing.T) {
+	homeDir := t.TempDir()
+	svc, err := NewService(homeDir, t.TempDir(), "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, ok := svc.registry.Get(model.AgentOpenCode)
+	if !ok {
+		t.Fatal("OpenCode adapter not found")
+	}
+	pluginDir := filepath.Join(adapter.GlobalConfigDir(homeDir), "plugins")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	released := func(rel string) []byte {
+		data, err := os.ReadFile(filepath.Join("..", "opencoderuntimeplugins", "testdata", "released", filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	owned := map[string][]byte{
+		"opencode-review-transport.ts": released("v3.7.0/plugins/opencode-review-transport.ts"),
+		"sdd-task-result-artifacts.ts": released("v3.7.0/plugins-v2/sdd-task-result-artifacts.ts"),
+		"background-agents.ts":         released("v1.33.2/plugins/background-agents.ts"),
+		"review-result-artifacts.ts":   released("v2.1.7/plugins/review-result-artifacts.ts"),
+	}
+	user := map[string][]byte{
+		"skill-registry.ts": append(released("v3.7.0/plugins/opencode-review-transport.ts"), "// user edit\n"...),
+		"model-variants.ts": released("v3.7.0/plugins/sdd-task-result-artifacts.ts"),
+	}
+	for _, files := range []map[string][]byte{owned, user} {
+		for name, data := range files {
+			if err := os.WriteFile(filepath.Join(pluginDir, name), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	plan, err := svc.buildPlan([]model.AgentID{model.AgentOpenCode}, allManagedComponents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.executePlan(plan, []model.AgentID{model.AgentOpenCode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range owned {
+		path := filepath.Join(pluginDir, name)
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("released plugin bytes %s kept: %v", name, err)
+		}
+		if !slices.Contains(result.RemovedFiles, path) {
+			t.Errorf("released plugin removal not reported: %s", path)
+		}
+	}
+	for name, data := range user {
+		if got, err := os.ReadFile(filepath.Join(pluginDir, name)); err != nil || string(got) != string(data) {
+			t.Errorf("user plugin bytes %s changed: %v", name, err)
+		}
+	}
+}
+
+// A symlinked plugins directory is user-owned, as Install treats it: uninstall
+// neither removes the link nor deletes plugin bytes through it.
+func TestFullAgentOpenCodeUninstallPreservesSymlinkedPluginsDirectory(t *testing.T) {
+	homeDir := t.TempDir()
+	svc, err := NewService(homeDir, t.TempDir(), "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, ok := svc.registry.Get(model.AgentOpenCode)
+	if !ok {
+		t.Fatal("OpenCode adapter not found")
+	}
+	root := adapter.GlobalConfigDir(homeDir)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	body, err := assets.Read("opencode/plugins/model-variants.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shipped := filepath.Join(target, "model-variants.ts")
+	if err := os.WriteFile(shipped, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pluginDir := filepath.Join(root, "plugins")
+	if err := os.Symlink(target, pluginDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	preserved := func(stage string) {
+		t.Helper()
+		if info, err := os.Lstat(pluginDir); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s: symlinked plugins directory removed: %v %v", stage, info, err)
+		}
+		if got, err := os.ReadFile(shipped); err != nil || string(got) != body {
+			t.Fatalf("%s: deleted through plugins symlink: %v", stage, err)
+		}
+	}
+	// The plugin operations guard themselves, whatever else the plan checks.
+	for _, op := range retainedOpenCodePluginOperations(adapter, homeDir) {
+		if _, _, err := op.apply(op.path); err != nil {
+			t.Fatalf("plugin operation %s: %v", op.path, err)
+		}
+	}
+	preserved("plugin operations")
+	// The full plan may refuse the symlink outright; either way nothing moves.
+	if plan, err := svc.buildPlan([]model.AgentID{model.AgentOpenCode}, allManagedComponents); err == nil {
+		if _, err := svc.executePlan(plan, []model.AgentID{model.AgentOpenCode}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preserved("full uninstall")
+}
+
 // TestFullAgentOpenCodePluginsUnderXDGConfigHome pins #3219 for the retained
 // plugin owner: uninstall resolves the same OpenCode config dir as installation.
 func TestFullAgentOpenCodePluginsUnderXDGConfigHome(t *testing.T) {
@@ -2398,8 +2516,12 @@ func TestPartialUninstallLeavesNonJSONNativeSettingsUntouched(t *testing.T) {
 			if got := string(mustReadServiceFile(t, settingsPath)); got != tt.content {
 				t.Fatalf("native settings = %q, want bytes preserved %q", got, tt.content)
 			}
-			if info, err := os.Stat(settingsPath); err != nil || info.Mode().Perm() != 0o600 {
-				t.Fatalf("native settings mode = %v, %v; want 0600", info, err)
+			wantMode := os.FileMode(0o600)
+			if runtime.GOOS == "windows" {
+				wantMode = 0o666 // Windows reports only the read-only attribute.
+			}
+			if info, err := os.Stat(settingsPath); err != nil || info.Mode().Perm() != wantMode {
+				t.Fatalf("native settings mode = %v, %v; want %v", info, err, wantMode)
 			}
 			prompt := string(mustReadServiceFile(t, promptPath))
 			if strings.Contains(prompt, "gentle-ai:persona") || !strings.Contains(prompt, "My own rules.") {

@@ -82,6 +82,11 @@ type InstallState struct {
 	// CodexOrchestratorAssignment is optional so legacy state preserves the user's top-level Codex configuration.
 	CodexOrchestratorAssignment *CodexOrchestratorAssignmentState `json:"codexOrchestratorAssignment,omitempty"`
 
+	// CodexServiceTier is the top-level config.toml service_tier Gentle AI wrote
+	// (for example "priority" for Fast). Empty means Gentle AI manages none, so
+	// a user-set service_tier is never touched.
+	CodexServiceTier string `json:"codexServiceTier,omitempty"`
+
 	// CodexCarrilModelAssignments maps the three carril profile names
 	// (sdd-strong|sdd-mid|sdd-cheap) to OpenAI subscription model IDs
 	// (e.g. "gpt-5.6-sol", "gpt-5.6-luna"). Persisted so that `gentle-ai sync`
@@ -216,7 +221,7 @@ func rejectAmbiguousPersonaKeys(data []byte) error {
 
 // Path returns the absolute path to the state file for the given home directory.
 func Path(homeDir string) string {
-	return filepath.Join(homeDir, stateDir, stateFile)
+	return filepath.Join(Dir(homeDir), stateFile)
 }
 
 // Read reads and unmarshals the state file from the given home directory.
@@ -305,6 +310,7 @@ func MergeAgents(existing InstallState, newAgents []string) InstallState {
 		KiroModelAssignments:        existing.KiroModelAssignments,
 		CodexModelAssignments:       existing.CodexModelAssignments,
 		CodexOrchestratorAssignment: existing.CodexOrchestratorAssignment,
+		CodexServiceTier:            existing.CodexServiceTier,
 		CodexCarrilModelAssignments: existing.CodexCarrilModelAssignments,
 		CodexPhaseModelAssignments:  existing.CodexPhaseModelAssignments,
 		Persona:                     existing.Persona,
@@ -323,7 +329,7 @@ func MergeAgents(existing InstallState, newAgents []string) InstallState {
 // Write persists the full install state to disk under the given home directory.
 // It creates the .gentle-ai directory if it does not already exist.
 func Write(homeDir string, s InstallState) error {
-	dir := filepath.Join(homeDir, stateDir)
+	dir := Dir(homeDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

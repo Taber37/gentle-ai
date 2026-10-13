@@ -34,16 +34,30 @@ func AssetDirectory(agent model.AgentID) (string, error) {
 	return major.PluginAssetDirectory()
 }
 
+// UserOwnedPathError reports a plugin path whose bytes or type Gentle AI cannot
+// prove it wrote. The path is preserved; callers may scope the refusal to the
+// plugin convergence instead of aborting unrelated work (issue #5393).
+type UserOwnedPathError struct {
+	Path    string
+	message string
+}
+
+func (e *UserOwnedPathError) Error() string { return e.message }
+
+func userOwnedPath(path, format string) error {
+	return &UserOwnedPathError{Path: path, message: fmt.Sprintf(format, path)}
+}
+
 // ValidateReplacement refuses, before any plugin changes, every path Install
 // would replace or remove unless it is a regular file holding bytes a Gentle AI
 // release shipped for that name. Any other bytes are user-owned.
 func ValidateReplacement(dir string, agent model.AgentID) error {
 	if info, err := os.Lstat(dir); err == nil && !info.IsDir() {
-		return fmt.Errorf("OpenCode plugin directory %s is not a directory; user path preserved", dir)
+		return userOwnedPath(dir, "OpenCode plugin directory %s is not a directory; user path preserved; move or delete it to let Gentle AI install its managed plugins")
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	for _, name := range append(ManagedPluginNames(agent), retiredPluginNames(agent)...) {
+	for _, name := range OpenCodePluginLifecycleNames(agent) {
 		path := filepath.Join(dir, name)
 		info, err := os.Lstat(path)
 		if os.IsNotExist(err) {
@@ -53,32 +67,23 @@ func ValidateReplacement(dir string, agent model.AgentID) error {
 			return err
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("OpenCode plugin %s is not a regular file; user path preserved; move or delete it to let Gentle AI install its managed plugins", path)
+			return userOwnedPath(path, "OpenCode plugin %s is not a regular file; user path preserved; move or delete it to let Gentle AI install its managed plugins")
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		if !releasedPlugin(name, data) {
-			return fmt.Errorf("OpenCode plugin %s does not match any Gentle AI release; custom bytes preserved; move or delete it to let Gentle AI install its managed plugins", path)
+		if !ReleasedPlugin(name, data) {
+			return userOwnedPath(path, "OpenCode plugin %s does not match any Gentle AI release; custom bytes preserved; move or delete it to let Gentle AI install its managed plugins")
 		}
 	}
 	return nil
 }
 
-// retiredPluginNames are earlier managed plugins Install removes.
-func retiredPluginNames(agent model.AgentID) []string {
-	switch agent {
-	case model.AgentOpenCode:
-		return []string{"background-agents.ts", LegacyOpenCodeReviewPluginName}
-	case model.AgentKilocode:
-		return []string{LegacyOpenCodeReviewPluginName}
-	default:
-		return nil
-	}
-}
-
-func releasedPlugin(name string, data []byte) bool {
+// ReleasedPlugin is the ownership proof for managed and retired plugins: data
+// is Gentle AI-owned only when some release shipped exactly these bytes under
+// name. Every other byte sequence belongs to the user.
+func ReleasedPlugin(name string, data []byte) bool {
 	sum := sha256.Sum256(data)
 	return slices.Contains(releasedPluginDigests[name], hex.EncodeToString(sum[:]))
 }
@@ -89,6 +94,16 @@ func Install(home string, adapter agents.Adapter) (Result, error) {
 		return Result{}, err
 	}
 	return InstallFromDirectory(home, adapter, assetDir)
+}
+
+// PluginPaths lists every path Install can write or remove for the adapter.
+func PluginPaths(home string, adapter agents.Adapter) []string {
+	dir := filepath.Join(adapter.GlobalConfigDir(home), "plugins")
+	paths := make([]string, 0)
+	for _, name := range OpenCodePluginLifecycleNames(adapter.Agent()) {
+		paths = append(paths, filepath.Join(dir, name))
+	}
+	return paths
 }
 
 func InstallFromDirectory(home string, adapter agents.Adapter, assetDir string) (Result, error) {
